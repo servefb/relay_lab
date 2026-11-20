@@ -58,6 +58,7 @@ class BenchmarkData:
     status_code: Optional[int] = None  # HTTP status code; set for non-200 responses
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    token_source: Optional[str] = None  # reported, estimated or missing
 
     # --- Multi-turn specific (only populated in multi-turn benchmark mode) ---
     input_num_turns: int = 0
@@ -107,6 +108,14 @@ class BenchmarkData:
         Must be called after the response is fully received.  Idempotent:
         token counts already present will not be re-parsed.
         """
+        if self.token_source is None:
+            if type(self.prompt_tokens) is int and self.prompt_tokens >= 0 and type(self.completion_tokens) is int and self.completion_tokens >= 0:
+                self.token_source = 'reported'
+            elif getattr(getattr(api_plugin, 'param', None), 'api', None) == 'openai_responses':
+                # The Responses parser does not estimate absent usage.
+                self.token_source = 'missing'
+            else:
+                self.token_source = 'estimated'
         if self.prompt_tokens is None or self.completion_tokens is None:
             self.prompt_tokens, self.completion_tokens = api_plugin.parse_responses(
                 self.response_messages, request=self.request

@@ -1,18 +1,32 @@
 $ErrorActionPreference = 'Stop'
 $address = 'http://127.0.0.1:9011'
+$user = if ($env:RELAY_LAB_USERNAME) { $env:RELAY_LAB_USERNAME } else { 'admin' }
+$pass = if ($env:RELAY_LAB_PASSWORD) { $env:RELAY_LAB_PASSWORD } else { 'relay-lab' }
+$loginBody = @{ username = $user; password = $pass } | ConvertTo-Json
+
 try {
-    $runs = Invoke-RestMethod -Uri "$address/api/runs" -TimeoutSec 5
+    Invoke-RestMethod -Method Post -Uri "$address/api/auth/login" -ContentType 'application/json' `
+        -Body $loginBody -SessionVariable lab -TimeoutSec 5 | Out-Null
 } catch {
-    throw 'Relay Lab is not answering on port 9011; nothing to stop.'
+    throw 'Relay Lab is not answering on port 9011 (or login failed); nothing to stop.'
 }
+
+try {
+    $runs = Invoke-RestMethod -Uri "$address/api/runs" -WebSession $lab -TimeoutSec 5
+} catch {
+    throw 'Relay Lab login succeeded but /api/runs failed; refusing to kill blindly.'
+}
+
 foreach ($run in $runs.runs) {
     if ($run.status -in @('running', 'stopping')) {
-        Invoke-RestMethod -Method Post -Uri "$address/api/runs/$($run.run_id)/stop" -ContentType 'application/json' -Body '{}' -TimeoutSec 5 | Out-Null
+        Invoke-RestMethod -Method Post -Uri "$address/api/runs/$($run.run_id)/stop" `
+            -ContentType 'application/json' -Body '{}' -WebSession $lab -TimeoutSec 5 | Out-Null
     }
 }
 $active = $null
 for ($i = 0; $i -lt 30; $i++) {
-    $active = (Invoke-RestMethod -Uri "$address/api/runs" -TimeoutSec 5).runs | Where-Object { $_.status -in @('running', 'stopping') }
+    $active = (Invoke-RestMethod -Uri "$address/api/runs" -WebSession $lab -TimeoutSec 5).runs |
+        Where-Object { $_.status -in @('running', 'stopping') }
     if (-not $active) { break }
     Start-Sleep -Seconds 1
 }

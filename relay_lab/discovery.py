@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from . import netutil
 from .config import ModelsRequest, ModelsResponse
 
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -37,21 +38,45 @@ def models_endpoint(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path + '/models', '', ''))
 
 
+def _connection_error_message(error: httpx.RequestError) -> str:
+    """Explain connect failures without echoing upstream or proxy details."""
+    text = str(error).lower()
+    if isinstance(error, httpx.ConnectError) and ('certificate' in text or 'ssl' in text or 'tls' in text):
+        return '无法校验证书，请检查 HTTPS 证书或本机是否启用了 HTTPS 解密代理。'
+    if isinstance(error, httpx.ProxyError):
+        return '无法通过系统代理连接模型列表接口，请检查本地代理是否已启动。'
+    if isinstance(error, httpx.ConnectError):
+        return '无法连接模型列表接口，请检查地址、网络；若本机需代理访问外网，请确认系统代理可用。'
+    return '无法连接模型列表接口，请检查地址、网络和 HTTPS 证书。'
+
+
 def fetch_models(connection: ModelsRequest) -> ModelsResponse:
     """GET one list only; never follow redirects, infer model IDs, or invoke generation."""
     endpoint = models_endpoint(connection.url)
     headers = {'Accept': 'application/json', 'Accept-Encoding': 'identity'}
-    if connection.api_key:
-        headers['Authorization'] = f'Bearer {connection.api_key.get_secret_value().strip()}'
+    key = connection.api_key.get_secret_value().strip() if connection.api_key else ''
+    if key:
+        headers['Authorization'] = f'Bearer {key}'
     messages = {
-        401: '获取失败：API Key 无效或已过期，请检查密钥。',
+        401: (
+            '请先填写 API Key。'
+            if not key
+            else '获取失败：API Key 无效或已过期，请检查密钥。'
+        ),
         403: '获取失败：该 Key 没有读取模型列表的权限。',
         404: '该站点未提供此模型列表接口，请检查 API 地址或联系站点管理员开放 /v1/models。',
         429: '模型列表接口被限流，请稍后再试。',
     }
+    # Match quality/contract: honour the system proxy when this machine needs one,
+    # after scrubbing NO_PROXY entries that would make client construction itself fail.
+    netutil.sanitize_proxy_environment()
     try:
         started = time.monotonic()
-        with httpx.Client(timeout=httpx.Timeout(10, connect=5), follow_redirects=False, trust_env=False) as client:
+        with httpx.Client(
+            timeout=httpx.Timeout(15, connect=8),
+            follow_redirects=False,
+            trust_env=netutil.trust_env_usable(),
+        ) as client:
             with client.stream('GET', endpoint, headers=headers) as response:
                 if response.status_code != 200:
                     if 300 <= response.status_code < 400:
@@ -59,7 +84,7 @@ def fetch_models(connection: ModelsRequest) -> ModelsResponse:
                     raise DiscoveryError(messages.get(response.status_code, '获取模型列表失败：站点返回异常状态。'))
                 content = bytearray()
                 for chunk in response.iter_bytes():
-                    if time.monotonic() - started > 12:
+                    if time.monotonic() - started > 18:
                         raise DiscoveryError('获取模型列表超时，请检查网络或站点状态。', 504)
                     content.extend(chunk)
                     if len(content) > MAX_RESPONSE_BYTES:
@@ -68,8 +93,8 @@ def fetch_models(connection: ModelsRequest) -> ModelsResponse:
         raise DiscoveryError('API 地址或密钥格式不正确，请检查后重试。', 400) from None
     except httpx.TimeoutException:
         raise DiscoveryError('获取模型列表超时，请检查网络或站点状态。', 504) from None
-    except httpx.RequestError:
-        raise DiscoveryError('无法连接模型列表接口，请检查地址、网络和 HTTPS 证书。') from None
+    except httpx.RequestError as error:
+        raise DiscoveryError(_connection_error_message(error)) from None
     try:
         payload = json.loads(content)
     except (ValueError, UnicodeError):

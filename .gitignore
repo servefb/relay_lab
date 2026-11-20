@@ -9,3 +9,5 @@ data/
 .idea/
 .e2e-data/
 .selfcheck_*.py
+web/node_modules/
+web/*.tsbuildinfo

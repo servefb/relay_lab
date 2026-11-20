@@ -9,22 +9,125 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-Phase = Literal['rpm', 'tpm', 'speed', 'parallel', 'quality', 'contract']
-RunKind = Literal['capacity', 'speed', 'parallel', 'quality', 'contract']
+Phase = Literal['rpm', 'tpm', 'speed', 'parallel', 'quality', 'contract', 'load']
+RunKind = Literal['capacity', 'speed', 'parallel', 'quality', 'contract', 'load']
 
-QUALITY_CATEGORIES: tuple[str, ...] = ('算术', '指令', 'JSON', '中文理解', '代码', '逻辑推理', '多模态')
-"""The only category names the built-in suite can serve; a typo must fail loudly."""
+QUALITY_CATEGORIES_BY_PACK: dict[str, tuple[str, ...]] = {
+    'standard': ('STEM', '人文', '社科', '其他'),
+    'smoke': ('算术', '指令', 'JSON', '中文理解', '代码', '逻辑推理', '多模态'),
+}
+"""Category chips depend on the selected pack; unknown names must fail loudly."""
+
+QUALITY_CATEGORIES: tuple[str, ...] = tuple(
+    dict.fromkeys(category for categories in QUALITY_CATEGORIES_BY_PACK.values() for category in categories)
+)
+
+QUALITY_PACKS: tuple[str, ...] = ('standard', 'smoke')
+"""standard = MMLU curated MCQ subset; smoke = original Chinese hand suite."""
+
+DATASET_PRESETS: dict[str, dict[str, object]] = {
+    'default': {
+        'name': '内置短输入（约 35 token）',
+        'input_tokens': None,
+        'note': '默认口径：输入极短，瓶颈落在调度与排队，RPM 数字最接近"每分钟请求数"。',
+    },
+    'short-short': {
+        'name': '短入短出（测 RPM 上限）',
+        'input_tokens': 64,
+        'note': '输入与输出都短，最适合测 RPM 上限；吞吐受解码拖累最小。',
+    },
+    'long-short': {
+        'name': '长入短出（测预填充能力）',
+        'input_tokens': 4096,
+        'note': '长上下文 + 短回答，瓶颈落在预填充；此时 RPM 反映的是"每分钟能吃多少输入 token"。',
+    },
+    'short-long': {
+        'name': '短入长出（测 TPM 上限）',
+        'input_tokens': 64,
+        'note': '短输入 + 长输出，瓶颈落在解码，最适合测 TPM 上限。',
+    },
+    'long-long': {
+        'name': '长入长出（最重负载）',
+        'input_tokens': 4096,
+        'note': '输入输出都长，单请求成本最高；用于观察双重瓶颈叠加后的实际承载。',
+    },
+}
+"""Named workloads. A relay's capacity depends more on token shape than on model name."""
+
+PRESET_LABEL = {key: str(value['name']) for key, value in DATASET_PRESETS.items()}
+
+CONTRACT_PROTOCOLS: tuple[str, ...] = ('openai', 'openai_responses', 'anthropic')
+"""Wire protocols the contract suite can cover; callers may select a non-empty subset."""
+
+CONTRACT_MODES: tuple[str, ...] = ('fast', 'full')
+"""fast = core high-signal probes on the primary wire (no cache wait); full = complete KVV matrix."""
 
 CONTRACT_CHECKS: tuple[str, ...] = (
     'system',
     'tools',
+    'parallel_tools',
+    'stream_tools',
+    'tool_choice_auto',
+    'tool_choice_required',
+    'tool_choice_none',
+    'tool_choice_named',
+    'dynamic_tools',
+    'dynamic_tools_both',
+    'dynamic_tools_mutex',
+    'dynamic_tools_role',
+    'dynamic_tools_dup',
+    'tool_choice_required_bare',
     'json_schema',
+    'schema_errors',
+    'tool_schema_reject',
     'max_tokens',
     'stop',
     'multi_turn',
+    'thinking',
+    'preserved_thinking',
+    'thinking_roundtrip',
+    'reasoning_effort',
+    'reasoning_effort_invalid',
+    'tool_roundtrip',
+    'tool_followup',
     'errors',
+    'auth_missing',
     'stream',
+    'stream_usage',
     'cache',
+    'cache_headers',
+    'cache_headers_stream',
+    'cache_headers_5m',
+    'cache_headers_5m_stream',
+    'cache_roundtrip',
+    'cache_roundtrip_stream',
+    'cache_roundtrip_5m',
+    'cache_roundtrip_5m_stream',
+    'cache_tools_prefix',
+    'cache_tools_append',
+    'cache_breakpoint',
+    'anthropic_cache_invalid',
+    'cache_options_echo',
+    'vision_base64',
+    'vision_url',
+    'vision_content_string',
+    'vision_video',
+    'vision_svg_reject',
+    'files_roundtrip',
+    'fixed_sampling',
+    'fixed_sampling_params',
+    'thinking_disable',
+    'thinking_disable_enable',
+    'thinking_disable_template',
+    'partial_mode',
+    'partial_json_mix',
+    'json_object',
+    'logprobs',
+    'routing',
+    'response_shape',
+    'usage',
+    'cache_write_headers_audit',
+    'error_fields_audit',
 )
 """Relay-fidelity probes: does the gateway forward what it was sent?
 
@@ -33,6 +136,36 @@ These are protocol questions, not model questions. A relay that drops ``tools``,
 plausibly, which is exactly why each probe is built to fail loudly when the request was
 altered. An unknown name would silently probe nothing, so it is rejected.
 """
+
+FAST_CONTRACT_CHECKS: tuple[str, ...] = (
+    'system',
+    'tools',
+    'tool_choice_auto',
+    'tool_choice_required',
+    'tool_choice_none',
+    'dynamic_tools',
+    'dynamic_tools_mutex',
+    'json_schema',
+    'max_tokens',
+    'stop',
+    'multi_turn',
+    'thinking',
+    'thinking_roundtrip',
+    'reasoning_effort',
+    'tool_roundtrip',
+    'errors',
+    'auth_missing',
+    'stream',
+    'stream_usage',
+    'cache',
+    'cache_headers',
+    'vision_base64',
+    'fixed_sampling',
+    'thinking_disable',
+    'response_shape',
+    'usage',
+)
+"""快速模式精简检查集：保留核心高信号防篡改与关键 KVV 契约项，跳过 15s 缓存等待与边缘矩阵。"""
 
 
 class Contract(BaseModel):
@@ -106,17 +239,58 @@ class LabSettings(ConnectionSettings):
     max_wall_seconds: int = Field(default=1200, ge=30, le=7200, strict=True)
     request_timeout: int = Field(default=60, ge=2, le=300, strict=True)
     cooldown_seconds: int = Field(default=10, ge=0, le=120, strict=True)
-    success_percent: float = Field(default=99, ge=90, le=100, allow_inf_nan=False)
+    success_percent: float = Field(default=90, ge=90, le=100, allow_inf_nan=False)
     ttft_p99_ms: float = Field(default=3000, gt=0, le=120000, allow_inf_nan=False)
-    tpot_p99_ms: float = Field(default=100, gt=0, le=10000, allow_inf_nan=False)
+    tpot_p99_ms: float = Field(default=50, gt=0, le=10000, allow_inf_nan=False)
+    capacity_ratio: float = Field(default=0.7, gt=0, le=1, allow_inf_nan=False)
+    """Suggested carrying capacity = measured * this ratio (usually leave ~30% headroom)."""
     short_output_tokens: int = Field(default=32, ge=8, le=256, strict=True)
     long_output_tokens: int = Field(default=1024, ge=64, le=4096, strict=True)
+    input_tokens: int | None = Field(default=None, ge=8, le=32000, strict=True)
+    """Optional target input length; ``None`` keeps the small built-in prompt (~35 tokens).
+
+    This changes *which bottleneck the ladder finds*, so it is not cosmetic:
+
+    * a **short** input keeps the RPM ladder bound by scheduling and queueing, which is
+      what makes an RPM figure mean "requests per minute" rather than "tokens per minute";
+    * a **long** input moves the bottleneck into prefill, so the same ladder now measures
+      how fast the site ingests context. That is a legitimate question, but a different
+      one, and the two numbers are not comparable.
+
+    The length is an estimate from a fixed words-per-token ratio, not a real tokenizer
+    count: the goal is a *repeatable* workload of roughly this size, not an exact count.
+    """
+    prompt_reuse: bool = False
+    """Send the same prompt every time, to measure throughput with a warm cache."""
+    dataset_preset: str | None = None
+    """Named workload from :data:`DATASET_PRESETS`; resolves to ``input_tokens``.
+
+    Kept as a separate field so a report says *which* workload produced a number, not
+    merely how long it was. It is applied after validation, so declaring a preset and a
+    contradicting ``input_tokens`` is rejected rather than silently resolved.
+    """
     seed: int = Field(default=42, ge=0, le=2147483647, strict=True)
 
     @model_validator(mode='after')
     def validate_bounds(self) -> 'LabSettings':
         if self.start_rpm > self.max_rpm:
             raise ValueError('起始 RPM 不能高于 RPM 安全上限')
+        if self.dataset_preset is not None:
+            preset = DATASET_PRESETS.get(self.dataset_preset)
+            if preset is None:
+                allowed = '、'.join(DATASET_PRESETS)
+                raise ValueError(f'未知的数据集预设 {self.dataset_preset}；可选：{allowed}')
+            declared = preset['input_tokens']
+            # Both given and different: the caller is contradicting itself, and picking
+            # one silently would make the report's stated workload a lie.
+            if self.input_tokens is not None and declared is not None and self.input_tokens != declared:
+                raise ValueError(
+                    f'数据集预设「{self.dataset_preset}」的输入长度是 {declared} token，'
+                    f'与显式指定的 {self.input_tokens} 冲突；请只保留一个'
+                )
+            if self.input_tokens is None:
+                # ``model_fields_set`` distinguishes "absent" from an explicit null.
+                self.input_tokens = declared  # type: ignore[assignment]
         return self
 
 
@@ -152,12 +326,21 @@ class ParallelSettings(ConnectionSettings):
 
 
 class QualitySettings(ConnectionSettings):
-    """Built-in smoke quality suite with deterministic grading."""
+    """Built-in quality smoke suite with deterministic grading."""
 
+    pack: Literal['standard', 'smoke'] = 'standard'
     categories: list[str] = Field(default_factory=list)
     per_category: int = Field(default=8, ge=1, le=20, strict=True)
     max_parallel: int = Field(default=1, ge=1, le=8, strict=True)
     request_timeout: int = Field(default=60, ge=2, le=300, strict=True)
+
+    @field_validator('pack')
+    @classmethod
+    def validate_pack(cls, value: str) -> str:
+        if value not in QUALITY_PACKS:
+            allowed = '、'.join(QUALITY_PACKS)
+            raise ValueError(f'未知的题包 {value}；可选：{allowed}')
+        return value
 
     @field_validator('categories')
     @classmethod
@@ -168,6 +351,15 @@ class QualitySettings(ConnectionSettings):
             allowed = '、'.join(QUALITY_CATEGORIES)
             raise ValueError(f'未知的题目分类 {unknown}；可选：{allowed}')
         return list(dict.fromkeys(value))
+
+    @model_validator(mode='after')
+    def categories_match_pack(self) -> 'QualitySettings':
+        allowed = set(QUALITY_CATEGORIES_BY_PACK.get(self.pack, ()))
+        mismatched = [name for name in self.categories if name not in allowed]
+        if mismatched:
+            names = '、'.join(QUALITY_CATEGORIES_BY_PACK.get(self.pack, ()))
+            raise ValueError(f'分类 {mismatched} 不属于题包 {self.pack}；可选：{names}')
+        return self
 
 
 class StartRequest(LabSettings):
@@ -209,6 +401,70 @@ class ParallelRequest(ParallelSettings):
         return StartRequest.require_explicit_authorization(value)
 
 
+class LoadSettings(ConnectionSettings):
+    """Closed-loop throughput: hold a fixed concurrency and count completions.
+
+    Defaults match the console's “快速吞吐 / 恒定并发” profile: 100 slots for one
+    minute. Raising ``concurrency_step`` / ``windows`` still allows a climb when
+    the caller wants one.
+    """
+
+    concurrency_start: int = Field(default=100, ge=1, le=256, strict=True)
+    concurrency_step: int = Field(default=0, ge=0, le=256, strict=True)
+    window_seconds: int = Field(default=60, ge=5, le=60, strict=True)
+    windows: int = Field(default=1, ge=1, le=12, strict=True)
+    output_tokens: int = Field(default=64, ge=8, le=4096, strict=True)
+    max_requests: int = Field(default=12000, ge=10, le=20000, strict=True)
+    request_timeout: int = Field(default=150, ge=2, le=300, strict=True)
+    success_percent: float = Field(default=90.0, ge=0, le=100, strict=True)
+    """SLA lower bound: window passes only at or above this success rate."""
+    circuit_success_percent: float = Field(default=80.0, ge=0, le=100, strict=True)
+    """Circuit breaker: below this success rate the site is treated as overloaded."""
+    max_consecutive_failures: int = Field(default=20, ge=0, le=10000, strict=True)
+    """Circuit breaker: this many failures in a row marks overload; 0 disables."""
+    avg_latency_ms: float = Field(default=150000, ge=0, le=600000, strict=True)
+    """Circuit breaker: mean latency above this ends the scene; 0 disables."""
+    ttft_p99_ms: float = Field(default=3000, gt=0, le=120000, allow_inf_nan=False)
+    tpot_p99_ms: float = Field(default=50, gt=0, le=10000, allow_inf_nan=False)
+    capacity_ratio: float = Field(default=0.7, gt=0, le=1, allow_inf_nan=False)
+    prompt_reuse: bool = False
+    """Send the same prompt every time, to measure throughput with a warm cache."""
+    stream: bool = True
+    """True sends SSE and scores first-byte TTFT. False waits for the whole JSON body."""
+    stop_on_failure: bool = True
+    """Stop the climb at the first window that fails the circuit or SLA."""
+    saturation_ratio: float = Field(default=0.05, ge=0, le=1, strict=True)
+    """Stop when throughput grows less than this share versus the previous window."""
+    seed: int = Field(default=42, ge=0, le=2147483647, strict=True)
+
+    @model_validator(mode='after')
+    def validate_load_bounds(self) -> 'LoadSettings':
+        # 快速吞吐底层使用 EvalScope perf 引擎，当前仅注册了 openai / openai_responses 插件。
+        if self.protocol not in ('openai', 'openai_responses'):
+            raise ValueError(f'快速吞吐暂不支持 {self.protocol} 协议，请选择 Chat Completions 或 Responses')
+        peak_concurrency = self.concurrency_start + (self.windows - 1) * self.concurrency_step
+        if peak_concurrency > 256:
+            raise ValueError(f'爬坡后最高并发 {peak_concurrency} 超过上限 256，请调小起始并发、步长或窗口数')
+        return self
+
+    @property
+    def duration(self) -> int:
+        """Total measured time; the ramp is this many windows of window_seconds."""
+        return self.window_seconds * self.windows
+
+
+class LoadRequest(LoadSettings):
+    """Throughput check plus the transient credential and consent flag."""
+
+    api_key: SecretStr | None = Field(default=None, exclude=True)
+    authorized: Literal[True]
+
+    @field_validator('authorized', mode='before')
+    @classmethod
+    def require_explicit_authorization(cls, value: object) -> bool:
+        return StartRequest.require_explicit_authorization(value)
+
+
 class QualityRequest(QualitySettings):
     """Quality check plus the transient credential and consent flag."""
 
@@ -224,11 +480,16 @@ class QualityRequest(QualitySettings):
 class ContractSettings(ConnectionSettings):
     """Relay-fidelity probes: a cheap suite that checks what the gateway forwards."""
 
+    mode: Literal['fast', 'full'] = 'full'
+    """检查模式：fast（快速模式，核心项+主协议+无缓存等待）或 full（全量模式，完整 KVV+多协议）。"""
     checks: list[str] = Field(default_factory=list)
+    # Empty → all CONTRACT_PROTOCOLS (full) or primary protocol (fast).
+    protocols: list[str] = Field(default_factory=list)
     per_check: int = Field(default=1, ge=1, le=3, strict=True)
     max_parallel: int = Field(default=1, ge=1, le=8, strict=True)
     request_timeout: int = Field(default=60, ge=2, le=300, strict=True)
     cache_prefix_tokens: int = Field(default=2048, ge=512, le=8192, strict=True)
+    cache_wait_seconds: int = Field(default=15, ge=15, le=300, strict=True)
 
     @field_validator('checks')
     @classmethod
@@ -239,6 +500,17 @@ class ContractSettings(ConnectionSettings):
             allowed = '、'.join(CONTRACT_CHECKS)
             raise ValueError(f'未知的契约检查 {unknown}；可选：{allowed}')
         return list(dict.fromkeys(value))
+
+    @field_validator('protocols')
+    @classmethod
+    def validate_protocols(cls, value: list[str]) -> list[str]:
+        """Keep contract wires inside the three supported protocols, in canonical order."""
+        unknown = [name for name in value if name not in CONTRACT_PROTOCOLS]
+        if unknown:
+            allowed = '、'.join(CONTRACT_PROTOCOLS)
+            raise ValueError(f'未知的协议 {unknown}；可选：{allowed}')
+        selected = [name for name in CONTRACT_PROTOCOLS if name in value]
+        return selected
 
 
 class ContractRequest(ContractSettings):
@@ -256,11 +528,9 @@ class ContractRequest(ContractSettings):
 class ContractItem(Contract):
     """One probe: what was asked, what came back, and what that proves.
 
-    ``verdict`` is deliberately three-valued. ``inconclusive`` exists because a relay can
-    legitimately refuse a feature (a text-only model cannot serve images, a site may not
-    implement ``json_schema``); calling that a failure would be a false accusation, and
-    calling it a pass would hide a dropped parameter. Only evidence that the request was
-    altered yields ``violated``.
+    ``verdict`` is four-valued. ``inconclusive`` is missing evidence; ``observation`` is
+    soft evidence (e.g. cache write=0 / named tool_choice 4xx) that must not dilute
+    fidelity. Only evidence that the request was altered yields ``violated``.
     """
 
     index: int
@@ -269,18 +539,32 @@ class ContractItem(Contract):
     prompt: str = ''
     expected: str = ''
     observed: str = ''
-    verdict: Literal['conformed', 'violated', 'inconclusive'] = 'inconclusive'
+    verdict: Literal['conformed', 'violated', 'inconclusive', 'observation'] = 'inconclusive'
     severity: Literal['high', 'medium', 'low'] = 'medium'
     detail: str = ''
+    protocol: str = ''
+    """Wire protocol used for this row (openai / openai_responses / anthropic)."""
     latency_ms: float | None = None
     ttft_ms: float | None = None
     error: str | None = None
+    response_headers: dict[str, str] = Field(default_factory=dict)
+    """Per-round response headers aligned with each round in ``response_body``."""
+    round_response_headers: list[dict[str, str]] = Field(default_factory=list)
+    """Wire artifacts for the export report; never include the API key."""
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    request_body: str = ''
+    response_body: str = ''
+    """Expected response-header names that were absent or empty for this probe."""
+    missing_response_headers: list[str] = Field(default_factory=list)
+    requests: int = 0
+    repeat: int = 1
 
 
 class CheckScore(Contract):
     conformed: int = 0
     violated: int = 0
     inconclusive: int = 0
+    observation: int = 0
     total: int = 0
 
 
@@ -289,6 +573,7 @@ class ContractSummary(Contract):
     conformed: int = 0
     violated: int = 0
     inconclusive: int = 0
+    observation: int = 0
     fidelity: float = 0
     by_check: dict[str, CheckScore] = Field(default_factory=dict)
     high_severity: int = 0
@@ -307,6 +592,14 @@ class LabStage(Contract):
     succeeded: int = 0
     seconds: float = 0
     success_percent: float = 0
+    # Only populated for finalized load windows with verified per-request logs.
+    partial_results: bool = False
+    window_rate_seconds: float | None = None
+    wall_seconds: float | None = None
+    token_source: Literal['reported', 'estimated', 'missing', 'unknown'] = 'unknown'
+    window_requests: int | None = None
+    window_succeeded: int | None = None
+    window_success_percent: float | None = None
     rpm: float = 0
     input_tpm: float | None = None
     output_tpm: float | None = None
@@ -318,7 +611,11 @@ class LabStage(Contract):
     tpot_p95_ms: float | None = None
     tpot_p99_ms: float | None = None
     latency_avg_ms: float | None = None
+    latency_p50_ms: float | None = None
+    latency_p90_ms: float | None = None
     latency_p95_ms: float | None = None
+    failure_reasons: dict[str, int] = Field(default_factory=dict)
+    """Why requests failed in this stage, counted from the per-request log."""
     latency_p99_ms: float | None = None
     mean_input_tokens: float | None = None
     mean_output_tokens: float | None = None
@@ -335,7 +632,7 @@ class LabFinding(Contract):
     phase: Literal['rpm', 'tpm']
     value: float | None = None
     pressure: int | None = None
-    status: Literal['pending', 'bounded', 'lower_bound', 'inconclusive'] = 'pending'
+    status: Literal['pending', 'bounded', 'lower_bound', 'latency_floor', 'inconclusive'] = 'pending'
     verified: bool = False
     message: str = '等待测试'
 
@@ -349,6 +646,7 @@ class QualityItem(Contract):
     prompt: str
     media_count: int = 0
     expected: str
+    source: str = ''
     answer: str = ''
     passed: bool = False
     ttft_ms: float | None = None
@@ -372,13 +670,34 @@ class QualitySummary(Contract):
     output_tps: float | None = None
 
 
+class LoadSummary(Contract):
+    """Result of a throughput run: the best window, not a capacity boundary."""
+
+    peak_concurrency: int | None = None
+    peak_rpm: float | None = None
+    suggested_rpm: float | None = None
+    """peak_rpm * capacity_ratio; leave headroom before calling it carrying capacity."""
+    success_total: int = 0
+    request_total: int = 0
+    windows: int = 0
+    saturated: bool = False
+    stop_reason: str | None = None
+
+
+class AIAnalysis(Contract):
+    summary_md: str
+    model: str
+    protocol: Literal['openai', 'openai_responses']
+    created_at: str
+
+
 class LabRun(Contract):
     """Public and persistable run state; no secrets or request bodies."""
 
     run_id: str
     created_at: str
     kind: RunKind = 'capacity'
-    settings: LabSettings | SpeedSettings | ParallelSettings | QualitySettings | ContractSettings
+    settings: LabSettings | SpeedSettings | ParallelSettings | QualitySettings | ContractSettings | LoadSettings
     fingerprint: str
     status: Literal['running', 'completed', 'stopping', 'stopped', 'error', 'interrupted'] = 'running'
     message: str = '实验已创建'
@@ -388,8 +707,10 @@ class LabRun(Contract):
     findings: list[LabFinding] = Field(default_factory=list)
     items: list[QualityItem] = Field(default_factory=list)
     quality: QualitySummary | None = None
+    load: LoadSummary | None = None
     contract: list[ContractItem] = Field(default_factory=list)
     contract_summary: ContractSummary | None = None
+    ai_analysis: AIAnalysis | None = None
     warnings: list[str] = Field(default_factory=list)
     engine: str = 'relay_lab 自有控制器 / EvalScope perf 引擎'
 

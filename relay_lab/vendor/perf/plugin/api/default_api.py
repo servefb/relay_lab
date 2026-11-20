@@ -161,6 +161,10 @@ class DefaultApiPlugin(ApiPluginBase):
             BenchmarkData: Aggregated benchmarking data for the request/response.
         """
         headers = {'Content-Type': 'application/json', **headers}
+        # Many relays only emit SSE when the client asks for it. Without this
+        # header they answer stream=true with one JSON body, and TTFT stays 0.
+        if isinstance(body, dict) and body.get('stream') is True:
+            headers.setdefault('Accept', 'text/event-stream')
         data = json.dumps(body, ensure_ascii=False)  # serialize to JSON
 
         output = BenchmarkData()
@@ -170,6 +174,7 @@ class DefaultApiPlugin(ApiPluginBase):
         output.request = data
         most_recent_timestamp = st
         last_output_timestamp: float | None = None
+        first_byte: float | None = None
         try:
             async with client_session.post(url=url, data=data, headers=headers) as response:
                 content_type = response.headers.get('Content-Type', '')
@@ -181,6 +186,8 @@ class DefaultApiPlugin(ApiPluginBase):
                         async for chunk_bytes in response.content.iter_any():
                             if not chunk_bytes:
                                 continue
+                            if first_byte is None:
+                                first_byte = time.perf_counter() - st
 
                             messages = handler.add_chunk(chunk_bytes)
                             for message in messages:
@@ -245,6 +252,8 @@ class DefaultApiPlugin(ApiPluginBase):
                         output.success = output.error is None
                         output.completed_time = most_recent_timestamp
                         output.query_latency = most_recent_timestamp - st
+                        if output.first_chunk_latency <= 0 and first_byte is not None:
+                            output.first_chunk_latency = first_byte
 
                     # Handle non-stream JSON responses
                     elif 'application/json' in content_type or 'application/' in content_type:
@@ -262,36 +271,39 @@ class DefaultApiPlugin(ApiPluginBase):
                         output.first_chunk_latency = output.query_latency
 
                         if isinstance(payload, dict):
-                            # Extract generated text from choices
-                            text = ''
-                            if choices := payload.get('choices'):
-                                first = choices[0] if choices else {}
-                                # Chat Completions format
-                                msg = first.get('message') or {}
-                                if isinstance(msg, dict) and msg.get('content') is not None:
-                                    text = (msg.get('content') or '') + (msg.get('reasoning_content') or '')
-                                else:
-                                    # Legacy Completions format
-                                    text = first.get('text') or ''
-                            generated_text = text
+                            if payload.get('error') is not None or payload.get('object') == 'error':
+                                output.error = json.dumps(payload, ensure_ascii=False)
+                            else:
+                                # Extract generated text from choices
+                                text = ''
+                                if choices := payload.get('choices'):
+                                    first = choices[0] if choices else {}
+                                    # Chat Completions format
+                                    msg = first.get('message') or {}
+                                    if isinstance(msg, dict) and msg.get('content') is not None:
+                                        text = (msg.get('content') or '') + (msg.get('reasoning_content') or '')
+                                    else:
+                                        # Legacy Completions format
+                                        text = first.get('text') or ''
+                                generated_text = text
 
-                            # Extract usage if provided
-                            if usage := payload.get('usage'):
-                                output.prompt_tokens = usage.get('prompt_tokens')
-                                output.completion_tokens = usage.get('completion_tokens')
-                                # Extract real cached tokens from prompt_tokens_details
-                                _details = usage.get('prompt_tokens_details')
-                                if _details and isinstance(_details, dict):
-                                    _cached = _details.get('cached_tokens')
-                                    if _cached is not None:
-                                        output.real_cached_tokens = _cached
+                                # Extract usage if provided
+                                if usage := payload.get('usage'):
+                                    output.prompt_tokens = usage.get('prompt_tokens')
+                                    output.completion_tokens = usage.get('completion_tokens')
+                                    # Extract real cached tokens from prompt_tokens_details
+                                    _details = usage.get('prompt_tokens_details')
+                                    if _details and isinstance(_details, dict):
+                                        _cached = _details.get('cached_tokens')
+                                        if _cached is not None:
+                                            output.real_cached_tokens = _cached
 
                             output.response_messages.append(payload)
                         else:
                             generated_text = str(payload)
 
                         output.generated_text = generated_text
-                        output.success = True
+                        output.success = output.error is None
 
                     else:
                         # Unknown successful content-type: read as text

@@ -25,8 +25,15 @@ async def _send_request(
     client: 'AioHttpClient',
     track_gpu_memory: bool = False,
     on_send: Optional[Callable[[], None]] = None,
+    on_acquire: Optional[Callable[[], None]] = None,
+    should_skip: Optional[Callable[[], bool]] = None,
 ) -> None:
     async with semaphore:
+        if on_acquire is not None:
+            on_acquire()
+        # 拿到信号量时若窗口已到期，直接放弃发送，彻底杜绝窗口外偷发请求。
+        if should_skip is not None and should_skip():
+            return
         # Fired when the request actually goes out, not when its task was created.
         if on_send is not None:
             on_send()
@@ -124,6 +131,7 @@ class ClosedLoopStrategy(BenchmarkStrategy):
 
         dispatched = 0
         all_tasks: set[asyncio.Task] = set()
+        queued: set[asyncio.Task] = set()
         try:
             for i, (request, is_warmup) in enumerate(requests):
                 # Duration cap: stop dispatching once the deadline is hit.  It is
@@ -147,9 +155,33 @@ class ClosedLoopStrategy(BenchmarkStrategy):
 
                 # Keep the number of scheduled tasks bounded to avoid OOM.
                 if len(in_flight) >= max_in_flight:
-                    done, pending = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                    if duration is not None and deadline is None:
+                        # 让刚创建的任务先调度执行，以便首个正式请求及时触发 _arm_deadline。
+                        await asyncio.sleep(0)
+                    wait_timeout = max(0.0, deadline - time.perf_counter()) if deadline is not None else None
+                    done, pending = await asyncio.wait(
+                        in_flight,
+                        timeout=wait_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                     in_flight = pending
-                    await asyncio.gather(*done)
+                    if done:
+                        await asyncio.gather(*done)
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        logger.info(
+                            f'Duration deadline reached after dispatching {dispatched}/{n} requests; '
+                            'stopping further dispatches.'
+                        )
+                        break
+
+                task_holder: list[asyncio.Task] = []
+
+                def _mark_acquired(holder: list[asyncio.Task] = task_holder) -> None:
+                    if holder:
+                        queued.discard(holder[0])
+
+                def _is_expired() -> bool:
+                    return deadline is not None and time.perf_counter() >= deadline
 
                 task = asyncio.create_task(
                     _send_request(
@@ -160,11 +192,23 @@ class ClosedLoopStrategy(BenchmarkStrategy):
                         self.client,
                         self.track_gpu_memory,
                         on_send=None if is_warmup else _arm_deadline,
+                        on_acquire=_mark_acquired,
+                        should_skip=None if is_warmup else _is_expired,
                     )
                 )
+                task_holder.append(task)
+                queued.add(task)
                 in_flight.add(task)
                 all_tasks.add(task)
                 dispatched += 1
+
+            # 窗口到期后取消尚未拿到信号量的排队任务，避免窗口外再多发一整轮并发请求。
+            if deadline is not None and time.perf_counter() >= deadline and queued:
+                cancelled = list(queued)
+                for q_task in cancelled:
+                    q_task.cancel()
+                    in_flight.discard(q_task)
+                await asyncio.gather(*cancelled, return_exceptions=True)
 
             # Phase barrier: wait for all in-flight requests to finish.  Even when
             # the duration deadline has elapsed we let in-flight requests complete

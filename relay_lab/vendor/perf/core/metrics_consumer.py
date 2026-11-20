@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Tuple
 
 from tqdm import tqdm as tqdm_std
@@ -59,8 +60,11 @@ async def statistic_benchmark_metric(
     # Stream inserts to DB to avoid accumulating all results in memory.
     commit_every = args.db_commit_interval
     processed_since_commit = 0
+    last_commit_at = time.monotonic()
 
     with sqlite3.connect(result_db_path, check_same_thread=False) as con:
+        con.execute('PRAGMA journal_mode=WAL')
+        con.execute('PRAGMA synchronous=NORMAL')
         cursor = con.cursor()
         create_result_table(cursor)
 
@@ -89,6 +93,10 @@ async def statistic_benchmark_metric(
                 try:
                     benchmark_data = await asyncio.wait_for(benchmark_data_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    if processed_since_commit > 0 and time.monotonic() - last_commit_at >= 0.5:
+                        await asyncio.to_thread(con.commit)
+                        processed_since_commit = 0
+                        last_commit_at = time.monotonic()
                     continue
 
                 if benchmark_data.is_warmup:
@@ -120,9 +128,11 @@ async def statistic_benchmark_metric(
                 workload_timeline.feed(benchmark_data)
                 insert_benchmark_data(cursor, benchmark_data)
                 processed_since_commit += 1
-                if processed_since_commit >= commit_every:
+                now = time.monotonic()
+                if processed_since_commit >= commit_every or now - last_commit_at >= 0.5:
                     await asyncio.to_thread(con.commit)
                     processed_since_commit = 0
+                    last_commit_at = now
 
                 # Snapshot metrics and ship them to the visualizer off the event
                 # loop.  Skipped entirely when no visualizer is configured (the

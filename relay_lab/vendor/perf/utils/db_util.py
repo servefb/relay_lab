@@ -39,6 +39,11 @@ class DatabaseColumns:
     TIME_PER_OUTPUT_TOKEN = 'time_per_output_token'
     REQUEST_ID = 'request_id'
     IS_STREAM = 'is_stream'
+    # Local addition: failures used to be stored with no reason at all, so a stage
+    # that lost requests could not be told apart from one that was rate limited.
+    ERROR = 'error'
+    STATUS_CODE = 'status_code'
+    TOKEN_SOURCE = 'token_source'
 
 
 def load_prompt(prompt_path_or_text):
@@ -74,9 +79,19 @@ def create_result_table(cursor):
                       {DatabaseColumns.MAX_GPU_MEMORY_COST} REAL,
                       {DatabaseColumns.TIME_PER_OUTPUT_TOKEN} REAL,
                       {DatabaseColumns.REQUEST_ID} TEXT,
-                      {DatabaseColumns.IS_STREAM} INTEGER
+                      {DatabaseColumns.IS_STREAM} INTEGER,
+                      {DatabaseColumns.ERROR} TEXT,
+                      {DatabaseColumns.STATUS_CODE} INTEGER,
+                      {DatabaseColumns.TOKEN_SOURCE} TEXT
                    )"""
     )
+    # Databases written before these columns existed are still readable, but their
+    # old failure rows have no reason. Add the columns in place instead of failing.
+    existing = {row[1] for row in cursor.execute('PRAGMA table_info(result)')}
+    for column, kind in ((DatabaseColumns.ERROR, 'TEXT'), (DatabaseColumns.STATUS_CODE, 'INTEGER'),
+                         (DatabaseColumns.TOKEN_SOURCE, 'TEXT')):
+        if column not in existing:
+            cursor.execute(f'ALTER TABLE result ADD COLUMN {column} {kind}')
 
 
 def insert_benchmark_data(cursor: sqlite3.Cursor, benchmark_data: BenchmarkData):
@@ -104,6 +119,7 @@ def insert_benchmark_data(cursor: sqlite3.Cursor, benchmark_data: BenchmarkData)
             benchmark_data.completion_tokens,
             benchmark_data.max_gpu_memory_cost,
             benchmark_data.time_per_output_token,
+            benchmark_data.token_source,
         )
         query = f"""INSERT INTO result(
                       {DatabaseColumns.REQUEST}, {DatabaseColumns.START_TIME}, {DatabaseColumns.INTER_TOKEN_LATENCIES},
@@ -111,16 +127,24 @@ def insert_benchmark_data(cursor: sqlite3.Cursor, benchmark_data: BenchmarkData)
                       {DatabaseColumns.REQUEST_ID}, {DatabaseColumns.IS_STREAM},
                       {DatabaseColumns.LATENCY}, {DatabaseColumns.FIRST_CHUNK_LATENCY}, {DatabaseColumns.PROMPT_TOKENS},
                       {DatabaseColumns.COMPLETION_TOKENS}, {DatabaseColumns.MAX_GPU_MEMORY_COST},
-                      {DatabaseColumns.TIME_PER_OUTPUT_TOKEN}
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                      {DatabaseColumns.TIME_PER_OUTPUT_TOKEN}, {DatabaseColumns.TOKEN_SOURCE}
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         cursor.execute(query, common_columns + additional_columns)
     else:
         query = f"""INSERT INTO result(
                       {DatabaseColumns.REQUEST}, {DatabaseColumns.START_TIME}, {DatabaseColumns.INTER_TOKEN_LATENCIES},
                       {DatabaseColumns.SUCCESS}, {DatabaseColumns.RESPONSE_MESSAGES}, {DatabaseColumns.COMPLETED_TIME},
-                      {DatabaseColumns.REQUEST_ID}, {DatabaseColumns.IS_STREAM}
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
-        cursor.execute(query, common_columns)
+                      {DatabaseColumns.REQUEST_ID}, {DatabaseColumns.IS_STREAM},
+                      {DatabaseColumns.ERROR}, {DatabaseColumns.STATUS_CODE}
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        cursor.execute(
+            query,
+            common_columns
+            + (
+                benchmark_data.error,
+                benchmark_data.status_code,
+            ),
+        )
 
 
 def get_output_path(args: Arguments) -> str:

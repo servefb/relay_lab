@@ -63,7 +63,12 @@ def test_http_errors_are_explained_without_echoing_the_body(upstream: str) -> No
     _Handler.body = b'{"error":"secret-ish upstream detail"}'
     with pytest.raises(DiscoveryError) as error:
         fetch_models(ModelsRequest(url=upstream))
-    assert 'API Key' in str(error.value)
+    assert '填写 API Key' in str(error.value)
+    assert 'secret-ish' not in str(error.value)
+
+    with pytest.raises(DiscoveryError) as error:
+        fetch_models(ModelsRequest(url=upstream, api_key='bad-key'))
+    assert '无效或已过期' in str(error.value)
     assert 'secret-ish' not in str(error.value)
 
 

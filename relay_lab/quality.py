@@ -1,13 +1,12 @@
-"""Built-in smoke quality suite: fixed items, deterministic graders.
+"""Built-in quality smoke packs: fixed items, deterministic graders.
 
-This is not a benchmark. It answers one question: does this model, on this
+This is not a full benchmark. It answers one question: does this model, on this
 relay, still follow instructions and reason well enough to be usable? Graders
 are local and rule-based, so a pass never depends on another model's opinion.
 
-Items are spread over three difficulty levels on purpose: an easy-only suite
-saturates at 100% for every competent model and therefore says nothing about
-quality differences. Levels are reported separately, so "8/8 简单 + 0/2 困难"
-stays visible instead of being averaged into one number.
+The default `standard` pack is an MMLU multiple-choice subset (letter-only).
+The `smoke` pack keeps the original Chinese hand set. Levels are reported
+separately so easy/hard mix stays visible.
 """
 
 from __future__ import annotations
@@ -25,10 +24,11 @@ import httpx
 
 from . import netutil
 from .config import QUALITY_CATEGORIES, CategoryScore, QualityItem, QualitySettings, QualitySummary
-from .quality_media import CHART_B64, FRAME_B64S, SHAPES_B64, SIGN_B64, data_url
+from .quality_packs import PACK_META, SMOKE_ROWS, STANDARD_ROWS
 
 CATEGORIES = list(QUALITY_CATEGORIES)
 LEVELS = ['简单', '中等', '困难']
+PACK_LABELS = PACK_META
 
 
 @dataclass
@@ -53,6 +53,29 @@ class Item:
     # represented as sequential frames because Chat Completions has no standard
     # video field — frame sequences are what vision-capable endpoints accept.
     images: tuple[str, ...] = ()
+    source: str = ''
+
+
+def _items_from_rows(rows: list) -> list[Item]:
+    return [
+        Item(
+            category=category,
+            prompt=prompt,
+            expected=expected,
+            grader=grader,
+            level=level,
+            images=images,
+            source=source,
+        )
+        for category, prompt, expected, grader, level, images, source in rows
+    ]
+
+
+PACKS: dict[str, list[Item]] = {
+    'standard': _items_from_rows(STANDARD_ROWS),
+    'smoke': _items_from_rows(SMOKE_ROWS),
+}
+SUITE: list[Item] = PACKS['standard']
 
 
 def _number(text: str, expected: str) -> bool:
@@ -125,6 +148,18 @@ def _python(text: str, expected: str) -> bool:
     return all(word.lower() in low for word in required)
 
 
+def _choice(text: str, expected: str) -> bool:
+    """Grade MMLU-style A/B/C/D answers; tolerate Answer: B / (B) / B. wrappers."""
+    wanted = expected.strip().upper()
+    if wanted not in {'A', 'B', 'C', 'D'}:
+        return False
+    body = text.strip().upper()
+    matches = re.findall(r'(?<![A-Z])([ABCD])(?![A-Z])', body)
+    if matches:
+        return matches[-1] == wanted
+    return body.strip('.。)）') == wanted
+
+
 GRADERS: dict[str, Callable[[str, str], bool]] = {
     'number': _number,
     'contains': _contains,
@@ -133,155 +168,14 @@ GRADERS: dict[str, Callable[[str, str], bool]] = {
     'starts': _starts,
     'json': _json,
     'python': _python,
+    'choice': _choice,
 }
 
 
-SUITE: list[Item] = [
-    # ---------- 算术：多步计算、单位陷阱、小数 ----------
-    Item('算术', '37 乘以 24 等于多少？只输出数字。', '888', 'number', '简单'),
-    Item('算术', '240 的 15% 是多少？只输出数字。', '36', 'number', '简单'),
-    Item('算术', '一个班 48 人，其中 3/8 是女生，女生有多少人？只输出数字。', '18', 'number', '简单'),
-    Item('算术', '一件商品先涨价 20%，再降价 20%。最终价格是原价的百分之多少？只输出数字。', '96', 'number', '中等'),
-    Item('算术', '从 1 加到 100 等于多少？只输出数字。', '5050', 'number', '中等'),
-    Item('算术', '3 个人 6 天能完成一项工作，同样效率下 5 个人需要几天？保留一位小数。', '3.6', 'number', '中等'),
-    Item('算术', '甲管 6 小时注满水池，乙管 4 小时注满，两管同时开需要几小时？保留一位小数。', '2.4', 'number', '困难'),
-    Item('算术', '鸡兔同笼，共 35 个头、94 只脚。兔子有多少只？只输出数字。', '12', 'number', '困难'),
-    # ---------- 指令：格式、长度、变换 ----------
-    Item('指令', '只回复两个字：可以', '可以', 'exact', '简单'),
-    Item('指令', '把 Hello World 转成大写，只输出结果。', 'HELLO WORLD', 'exact', '简单'),
-    Item('指令', '用一句话回答，并且必须以“因为”开头：天空为什么是蓝色的？', '因为', 'starts', '简单'),
-    Item('指令', '输出三个交通工具名称，用中文逗号分隔，不要任何解释。', '，', 'contains', '简单'),
-    Item('指令', '把单词 relay 倒序输出，只输出结果。', 'yaler', 'exact', '中等'),
-    Item('指令', '用中文数字按顺序输出 1 到 5，用顿号分隔，不要解释。', '一、二、三、四、五', 'exact', '中等'),
-    Item('指令', '把这句话改写成被动句，只输出改写结果：团队完成了项目。', '被|完成', 'contains', '中等'),
-    Item('指令', '把十进制 42 转成二进制，只输出数字。', '101010', 'exact', '困难'),
-    # ---------- JSON：结构、嵌套、类型 ----------
-    Item('JSON', '只输出一个 JSON 对象，不要代码块，字段 ok 的值为 true。', '{"ok": true}', 'json', '简单'),
-    Item('JSON', '只输出一个 JSON 对象，不要代码块，字段 name 的值为 relay。', '{"name": "relay"}', 'json', '简单'),
-    Item('JSON', '只输出一个 JSON 数组，包含 1、2、3 三个数字。', '[1, 2, 3]', 'json', '简单'),
-    Item(
-        'JSON',
-        '只输出一个 JSON 对象，字段 code 等于 200，字段 msg 等于 ready。',
-        '{"code": 200, "msg": "ready"}',
-        'json',
-        '简单',
-    ),
-    Item(
-        'JSON',
-        '只输出一个 JSON 对象，包含嵌套对象 user，user 里 id 为 7、vip 为 false。',
-        '{"user": {"id": 7, "vip": false}}',
-        'json',
-        '中等',
-    ),
-    Item(
-        'JSON',
-        '只输出一个 JSON 数组，两个元素都是对象，第一个 id 为 1、ok 为 true，第二个 id 为 2、ok 为 false。',
-        '[{"id": 1, "ok": true}, {"id": 2, "ok": false}]',
-        'json',
-        '中等',
-    ),
-    Item(
-        'JSON',
-        '只输出一个 JSON 对象：字段 tags 是 ["a","b","c"]，字段 count 是 3。',
-        '{"tags": ["a", "b", "c"], "count": 3}',
-        'json',
-        '中等',
-    ),
-    Item(
-        'JSON',
-        '只输出一个 JSON 对象，字段 text 的值是字符 a、一个双引号、字符 b 组成的字符串。',
-        '{"text": "a\\"b"}',
-        'json',
-        '困难',
-    ),
-    # ---------- 中文理解：指代、否定、改写、语义 ----------
-    Item('中文理解', '找出这句话里你将要去的城市，只输出城市名：我下周从杭州飞往成都。', '成都', 'exact', '简单'),
-    Item('中文理解', '找出这句话的主语，只输出主语：小猫在窗台上睡觉。', '小猫', 'exact', '简单'),
-    Item('中文理解', '把这句话改成否定句，只输出改写后的句子：他今天会来。', '不', 'contains', '简单'),
-    Item('中文理解', '把“今天下雨了”翻译成英文，只输出英文。', 'rain', 'any', '简单'),
-    Item('中文理解', '“小明把书给了小红，因为她明天要用。”这句话里“她”指的是谁？只输出名字。', '小红', 'exact', '中等'),
-    Item('中文理解', '“他不是不想去。”他的意思是想去还是不想去？只回答“去”或“不去”。', '去', 'exact', '中等'),
-    Item(
-        '中文理解',
-        '把“虽然下雨了，但是比赛照常进行”改写成一个不用“虽然…但是”的句子，保留原意，并必须包含“仍然”。',
-        '仍然',
-        'contains',
-        '中等',
-    ),
-    Item('中文理解', '“画蛇添足”比喻做了什么？用一句话回答，且必须包含“多余”。', '多余', 'contains', '困难'),
-    # ---------- 代码：可解析、结构检查 ----------
-    Item('代码', '写一个 Python 函数 add(a, b)，只输出代码。', 'def add|return', 'contains', '简单'),
-    Item('代码', '用 Python 打印 1 到 5，只输出代码。', 'print|range', 'contains', '简单'),
-    Item('代码', '用一句话说明这段代码做什么：x = [i * i for i in range(3)]', '平方|0, 1, 4', 'any', '简单'),
-    Item('代码', '写一条 SQL，从 users 表里选出 name 列，只输出 SQL。', 'select|from|users', 'contains', '简单'),
-    Item(
-        '代码', '写一个 Python 函数 is_even(n)，返回 n 是否为偶数，只输出代码。', 'is_even|return|%', 'python', '中等'
-    ),
-    Item(
-        '代码',
-        '写一条 SQL：从 users 表选出 age 大于 18 的 name，按 name 升序。只输出 SQL。',
-        'select|where|order by',
-        'contains',
-        '中等',
-    ),
-    Item(
-        '代码',
-        '这段 Python 想求平均值但结果是错的：total = 0，循环里 total += x，最后 return total。'
-        '用一句话指出问题，必须包含“平均值”或“长度”。',
-        '平均值|长度|len',
-        'any',
-        '困难',
-    ),
-    Item(
-        '代码', '用 Python 写递归函数 fact(n) 计算阶乘，n 为 0 时返回 1，只输出代码。', 'fact|return', 'python', '困难'
-    ),
-    # ---------- 逻辑推理：三段论、数列、真假话、约束 ----------
-    Item('逻辑推理', '所有人都会死，苏格拉底是人。苏格拉底会死吗？只回答“会”或“不会”。', '会', 'exact', '简单'),
-    Item('逻辑推理', '数列 2、4、8、16、? 的下一项是多少？只输出数字。', '32', 'number', '简单'),
-    Item('逻辑推理', '9 个球里有一个偏重，用天平最少称几次一定能找出它？只输出数字。', '2', 'number', '简单'),
-    Item(
-        '逻辑推理',
-        '甲说“乙在说谎”，乙说“丙在说谎”，丙说“甲和乙都在说谎”。已知只有一个人说真话，是谁？只回答名字。',
-        '乙',
-        'exact',
-        '中等',
-    ),
-    Item(
-        '逻辑推理',
-        '“并非所有人都及格”等价于下面哪句？只输出改写后的句子：所有人都没及格 / 有人没及格。',
-        '有人没及格',
-        'contains',
-        '中等',
-    ),
-    Item('逻辑推理', '同时抛两枚均匀硬币，至少出现一个正面的概率是多少？只输出分数。', '3/4', 'exact', '中等'),
-    Item(
-        '逻辑推理', '甲乙丙丁四人赛跑。乙在甲前面，甲在丙前面，丁在丙后面。谁第一？只回答名字。', '乙', 'exact', '困难'
-    ),
-    Item(
-        '逻辑推理',
-        '三只箱子分别标“苹果”“橘子”“混合”，标签全错。只从一个箱子取一个水果，最少取几次能确定全部内容？只输出数字。',
-        '1',
-        'number',
-        '困难',
-    ),
-    # ---------- 多模态：图片与视频帧 ----------
-    Item('多模态', '图中凭单上印的通行码数字是多少？只输出数字。', '5827', 'number', '简单', (data_url(SIGN_B64),)),
-    Item('多模态', '数一数图里画了几个圆形，只输出数字。', '3', 'number', '简单', (data_url(SHAPES_B64),)),
-    Item('多模态', '这是柱状图。最高的那根柱子下方标的数字是几？只输出数字。', '3', 'number', '中等', (data_url(CHART_B64),)),
-    Item(
-        '多模态',
-        '下面四张图是同一段视频按时间顺序截取的帧。图中的实心圆在向左还是向右移动？只回答“左”或“右”。',
-        '右',
-        'contains',
-        '中等',
-        tuple(data_url(frame) for frame in FRAME_B64S),
-    ),
-]
-
-
 def select(settings: QualitySettings) -> list[Item]:
-    """Filter by category and cap per category; the order stays stable."""
-    wanted = [item for item in SUITE if not settings.categories or item.category in settings.categories]
+    """Filter by pack + category and cap per category; the order stays stable."""
+    suite = PACKS.get(settings.pack) or PACKS['standard']
+    wanted = [item for item in suite if not settings.categories or item.category in settings.categories]
     counts: dict[str, int] = {}
     chosen: list[Item] = []
     for item in wanted:
@@ -338,7 +232,9 @@ async def _call(
             'model': settings.model,
             'input': value,
             'max_output_tokens': 512,
-            'temperature': 0,
+            # Kimi / GLM thinking routes (and some OpenAI reasoning models) reject
+            # any temperature other than 1; graders are local so sampling still ok.
+            'temperature': 1,
             'stream': True,
         }
     else:
@@ -353,7 +249,7 @@ async def _call(
             'model': settings.model,
             'messages': [{'role': 'user', 'content': content}],
             'max_tokens': 512,
-            'temperature': 0,
+            'temperature': 1,
             'stream': True,
             'stream_options': {'include_usage': True},
         }
@@ -473,6 +369,7 @@ async def _run(
                     level=item.level,
                     prompt=item.prompt,
                     expected=item.expected,
+                    source=item.source,
                     media_count=len(item.images),
                     error='已取消',
                 )
@@ -485,6 +382,7 @@ async def _run(
                 level=item.level,
                 prompt=item.prompt,
                 expected=item.expected,
+                source=item.source,
                 answer=reply.text[:2000],
                 passed=passed,
                 ttft_ms=reply.ttft_ms,

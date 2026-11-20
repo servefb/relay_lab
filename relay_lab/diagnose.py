@@ -53,7 +53,8 @@ def _body(settings: object) -> dict:
         'model': settings.model,  # type: ignore[attr-defined]
         'messages': [{'role': 'user', 'content': 'ping'}],
         'max_tokens': 1,
-        'temperature': 0,
+        # Same constraint as contract/quality: thinking routes require temperature=1.
+        'temperature': 1,
         'stream': False,
     }
 

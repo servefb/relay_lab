@@ -32,24 +32,128 @@ INSTRUCTIONS = {
     'rpm': 'Classify the sentiment as positive, neutral, or negative. Answer with one word. Text: ',
     'speed': 'Explain in one short paragraph why streaming responses feel faster than batch responses. ',
     'tpm': 'Write a detailed practical guide to keeping a daily journal. Continue until the output limit. ',
+    # Throughput mode wants the short RPM-style task: output length is a setting there,
+    # not a property of the prompt, so reusing the TPM instruction would skew the count.
+    'load': 'Classify the sentiment as positive, neutral, or negative. Answer with one word. Text: ',
 }
 TAILS = {
     'rpm': 'The delivery arrived on time.',
     'speed': 'Keep it under 200 words.',
     'tpm': 'Include steps, examples and common mistakes.',
+    'load': 'The delivery arrived on time.',
 }
-
+TAIL_POOLS = {
+    # Distinct sentences so two requests are not byte-identical beyond the case id.
+    # A workload whose bodies only differ by a number still invites gateway-side
+    # dedupe/caching on content, and it cannot be described as "different requests".
+    'rpm': (
+        'The delivery arrived on time.',
+        'The package was damaged on arrival.',
+        'The driver was polite and quick.',
+        'It showed up without any notice.',
+        'Support solved the problem in minutes.',
+        'The refund took three full weeks.',
+    ),
+    'load': (
+        'The delivery arrived on time.',
+        'The package was damaged on arrival.',
+        'The driver was polite and quick.',
+        'It showed up without any notice.',
+        'Support solved the problem in minutes.',
+        'The refund took three full weeks.',
+    ),
+    'speed': (
+        'Keep it under 200 words.',
+        'Use one concrete example.',
+        'Avoid jargon where possible.',
+        'Mention a single trade-off.',
+    ),
+    'tpm': (
+        'Include steps, examples and common mistakes.',
+        'Cover beginners and advanced readers.',
+        'Add a short daily template.',
+        'Explain how to keep the habit.',
+        'Mention the usual pitfalls.',
+    ),
+}
 
 def endpoint_of(url: str) -> str:
     """Add the version prefix only when the address has no path of its own."""
     return url + '/v1' if not urlsplit(url).path.rstrip('/') else url
 
 
-def prompts(phase: str, count: int, seed: int) -> list[str]:
-    """Deterministic local workload; nothing is downloaded or cached between runs."""
+CHARS_PER_TOKEN = 4
+"""Deliberately conservative for English filler (~4 chars/token); CJK filler is ~1.5.
+
+Padding text here is ASCII, so 4 is the closest simple constant. The point is a
+*repeatable* length, not an exact tokenizer match, and the preset labels say "约".
+"""
+
+PAD_SENTENCES = (
+    'The following reference material exists only to occupy context; ignore its content. ',
+    'Section {index}: a maintenance log records routine checks with no unusual findings. ',
+    'In this passage the author restates the same neutral background several times over. ',
+    'Nothing in this text is a question, and no part of it should be answered or quoted. ',
+)
+
+
+def pad_to_tokens(target: int) -> str:
+    """Build single-line filler of roughly *target* tokens.
+
+    Single-line is a hard requirement: the custom dataset plugin reads the prompt file
+    line by line, so an embedded newline would silently split one prompt into several
+    shorter ones and change the workload without any error.
+    """
+    if target <= 0:
+        return ''
+    wanted_chars = target * CHARS_PER_TOKEN
+    parts: list[str] = []
+    length = 0
+    index = 0
+    while length < wanted_chars:
+        sentence = PAD_SENTENCES[index % len(PAD_SENTENCES)].format(index=index)
+        parts.append(sentence)
+        length += len(sentence)
+        index += 1
+    return ''.join(parts)[:wanted_chars]
+
+
+def prompts(
+    phase: str,
+    count: int,
+    seed: int,
+    input_tokens: int | None = None,
+    reuse: bool = False,
+) -> list[str]:
+    """Deterministic local workload; nothing is downloaded or cached between runs.
+
+    When ``input_tokens`` is set the filler is inserted *after* the instruction, so the
+    model still receives a real task at the start of a long context rather than a wall of
+    noise it can ignore entirely.
+
+    ``reuse`` collapses every entry onto the first prompt, which is the only honest way
+    to ask "what does this site do when the prefix cache hits". With ``reuse=False`` the
+    prompts differ in both the case id and the closing sentence, so a run really is a
+    stream of different requests rather than one request repeated with a counter.
+    """
     instruction = INSTRUCTIONS.get(phase, INSTRUCTIONS['tpm'])
-    tail = TAILS.get(phase, TAILS['tpm'])
-    return [f'Case {seed}-{index:06d}. {instruction}{tail}' for index in range(count)]
+    pool = TAIL_POOLS.get(phase, TAIL_POOLS['tpm'])
+    filler = pad_to_tokens(max(0, input_tokens - 24)) if input_tokens is not None else ''
+
+    def build(index: int) -> str:
+        if reuse:
+            index = 0
+        tail = pool[index % len(pool)]
+        head = f'Case {seed}-{index:06d}. {instruction}'
+        return f'{head}{filler} {tail}' if filler else f'{head}{tail}'
+
+    return [build(index) for index in range(count)]
+
+
+def prompt_tokens(phase: str, seed: int, input_tokens: int | None = None) -> int:
+    """Estimated input tokens for one prompt, used for budget reservation."""
+    sample = prompts(phase, 1, seed, input_tokens)[0]
+    return max(1, len(sample.encode('utf-8')) // CHARS_PER_TOKEN)
 
 
 def build(
@@ -68,10 +172,13 @@ def build(
     timeout: int,
     seed: int,
     warmup: int = 0,
+    stream: bool = True,
 ) -> Arguments:
     """Translate one stage into an EvalScope perf job."""
     return Arguments(
         model=model,
+        # 按批提交并配合消费端 0.5s 定时刷盘，兼顾高并发性能与实时进度刷新。
+        db_commit_interval=20,
         url=endpoint_of(url),
         api=protocol,
         api_key=api_key,
@@ -83,7 +190,9 @@ def build(
         rate=rate,
         duration=duration,
         max_tokens=max_tokens,
-        stream=True,
+        # Kimi / GLM thinking routes reject values other than 1.
+        temperature=1.0,
+        stream=stream,
         warmup_num=warmup,
         no_test_connection=True,
         total_timeout=timeout,
@@ -120,6 +229,16 @@ def _finite(value: Any) -> float | None:
     return None
 
 
+def _stream_ms(value: Any, streamed: int) -> float | None:
+    """TTFT only counts when the run actually received SSE and a positive first byte."""
+    if not streamed:
+        return None
+    number = _finite(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
 def _row(percentiles: PercentileResult, name: str) -> Any:
     return next((row for row in percentiles.rows if row.percentile == name), None)
 
@@ -138,6 +257,7 @@ def observe(stage: LabStage, result: Any) -> LabStage:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError('Native benchmark returned an invalid duration')
     p50 = _row(percentiles, '50%')
+    p90 = _row(percentiles, '90%')
     p95 = _row(percentiles, '95%')
     p99 = _row(percentiles, '99%')
     observed = stage.model_copy(deep=True)
@@ -149,14 +269,21 @@ def observe(stage: LabStage, result: Any) -> LabStage:
     # P95 alongside P99: P99 on a short stage is often just the maximum, so P95 is the
     # more stable capacity signal. The engine computes both; reading only P99 threw half
     # the available distribution away.
-    observed.ttft_p50_ms = _finite(p50.ttft) if p50 else None
-    observed.ttft_p95_ms = _finite(p95.ttft) if p95 else None
-    observed.ttft_p99_ms = _finite(p99.ttft) if p99 else None
-    observed.tpot_p50_ms = _finite(p50.tpot) if p50 else None
-    observed.tpot_p95_ms = _finite(p95.tpot) if p95 else None
-    observed.tpot_p99_ms = _finite(p99.tpot) if p99 else None
+    # A stored 0 is the unset default, not a measured first token. Non-stream
+    # replies also have no first-byte sample; don't publish that as TTFT.
+    streamed = getattr(summary, 'stream_requests', 0) or 0
+    observed.ttft_p50_ms = _stream_ms(p50.ttft if p50 else None, streamed)
+    observed.ttft_p95_ms = _stream_ms(p95.ttft if p95 else None, streamed)
+    observed.ttft_p99_ms = _stream_ms(p99.ttft if p99 else None, streamed)
+    observed.tpot_p50_ms = _finite(p50.tpot) if (streamed and p50) else None
+    observed.tpot_p95_ms = _finite(p95.tpot) if (streamed and p95) else None
+    observed.tpot_p99_ms = _finite(p99.tpot) if (streamed and p99) else None
     average = _finite(summary.avg_latency)
     observed.latency_avg_ms = average * 1000 if average else None
+    lat50 = _finite(p50.latency) if p50 else None
+    observed.latency_p50_ms = lat50 * 1000 if lat50 else None
+    lat90 = _finite(p90.latency) if p90 else None
+    observed.latency_p90_ms = lat90 * 1000 if lat90 else None
     mid = _finite(p95.latency) if p95 else None
     observed.latency_p95_ms = mid * 1000 if mid else None
     tail = _finite(p99.latency) if p99 else None

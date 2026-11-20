@@ -237,10 +237,11 @@ class OpenaiPlugin(DefaultApiPlugin):
         if not response.get('choices'):
             return
         for choice in response['choices']:
+            idx = choice.get('index', 0)
             if 'delta' in choice:
-                delta_contents[choice['index']].append(_parse_chat_delta(choice['delta'])[0])
+                delta_contents[idx].append(_parse_chat_delta(choice['delta'])[0])
             else:
-                delta_contents[choice['index']] = [_parse_chat_delta(choice['message'])[0]]
+                delta_contents[idx] = [_parse_chat_delta(choice['message'])[0]]
 
     def __calculate_tokens_from_content(self, request, content):
         input_tokens = output_tokens = 0
@@ -252,17 +253,14 @@ class OpenaiPlugin(DefaultApiPlugin):
                 # Calculate output tokens
                 output_tokens += self._count_output_tokens(full_response_content)
         else:
-            raise ValueError(
-                'Error: Unable to retrieve usage information\n\n'
-                'This error occurs when:\n'
-                '1. The API response does not contain usage data, AND\n'
-                '2. No tokenizer has been specified or found.\n\n'
-                'To resolve this issue, do ONE of the following:\n'
-                "a) Ensure that the API you're using supports and returns usage information, OR\n"
-                'b) Specify a tokenizer using the `--tokenizer-path` parameter.\n\n'
-                'If you continue to experience issues, '
-                'please open an issue on our GitHub repository https://github.com/modelscope/evalscope .'
-            )
+            # 缺少 usage 且未配置本地 tokenizer 时回退为字符估算，避免整场压测崩溃。
+            logger.warning('Response missing usage and no tokenizer configured; falling back to char-based token estimate.')
+            if request:
+                input_tokens = max(1, len(str(request)) // 4)
+            for choice_contents in content.values():
+                full_response_content = ''.join(choice_contents)
+                if full_response_content:
+                    output_tokens += max(1, len(full_response_content) // 4)
         return input_tokens, output_tokens
 
     def _count_input_tokens(self, request_str: str) -> int:

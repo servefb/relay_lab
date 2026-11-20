@@ -6,6 +6,7 @@ each protocol's own event vocabulary. No network.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -44,6 +45,20 @@ def main() -> None:
         if got != expected:
             problems.append(f'{protocol} {url} -> {got} != {expected}')
 
+    # Gemini streaming must opt into SSE explicitly: the bare verb answers one JSON
+    # array, which iter_lines would discard line by line.
+    stream_cases = [
+        ('gemini', 'https://relay.test', 'https://relay.test/v1beta/models/m-1:streamGenerateContent?alt=sse'),
+        ('gemini', 'https://relay.test/v1beta', 'https://relay.test/v1beta/models/m-1:streamGenerateContent?alt=sse'),
+        ('openai', 'https://relay.test/v1', 'https://relay.test/v1/chat/completions'),
+        ('anthropic', 'https://relay.test', 'https://relay.test/v1/messages'),
+    ]
+    for protocol, url, expected in stream_cases:
+        got = protocols.endpoint(settings(protocol, url), stream=True)
+        print(f'{"OK  " if got == expected else "FAIL"} {protocol:17s} stream {got}')
+        if got != expected:
+            problems.append(f'{protocol} stream {url} -> {got} != {expected}')
+
     # ---------- auth headers ----------
     anthropic = protocols.headers_for(settings('anthropic'), 'sk-secret')
     openai = protocols.headers_for(settings('openai'), 'sk-secret')
@@ -77,6 +92,26 @@ def main() -> None:
     if 'max_tokens' not in protocols.build_body(settings('anthropic'), 'hi', stream=False):
         problems.append('anthropic body must always carry max_tokens')
 
+    # Anthropic has no response_format: it must surface as Unsupported (probe ->
+    # inconclusive), never as a silently weakened request.
+    try:
+        protocols.build_body(
+            settings('anthropic'), 'hi', stream=False,
+            response_format=protocols.json_schema_format('x', {'type': 'object', 'properties': {}}),
+        )
+        problems.append('anthropic response_format must raise Unsupported, not be dropped')
+    except protocols.Unsupported:
+        pass
+    # Official tool_choice types: auto (omit), none, any, tool; anything else cannot be mapped.
+    none_choice = protocols.build_body(settings('anthropic'), 'hi', stream=False, tool_choice='none')
+    if none_choice.get('tool_choice') != {'type': 'none'}:
+        problems.append(f'anthropic tool_choice=none mapping: {none_choice.get("tool_choice")!r}')
+    try:
+        protocols.build_body(settings('anthropic'), 'hi', stream=False, tool_choice='sometimes')
+        problems.append('anthropic unknown tool_choice must raise Unsupported, not be dropped')
+    except protocols.Unsupported:
+        pass
+
     # ---------- gemini body ----------
     gem = protocols.build_body(
         settings('gemini'), 'hi', stream=False, system='S', max_tokens=32, stop=['9'],
@@ -92,24 +127,39 @@ def main() -> None:
     # Gemini needs uppercase type enums, not JSON-Schema lowercase.
     assert gem['generationConfig']['responseSchema']['properties']['ok']['type'] == 'BOOLEAN'
     assert gem['tools'][0]['functionDeclarations'][0]['parameters']['properties']['a']['type'] == 'STRING'
+    if 'stream' in gem:
+        problems.append('gemini body must not carry the non-official stream field')
     print('gemini generationConfig:', gem['generationConfig'])
 
     # ---------- anthropic parsing (streamed) ----------
     reply = Reply()
     for event in [
         {'type': 'message_start', 'message': {'usage': {'input_tokens': 11, 'cache_read_input_tokens': 7}}},
-        {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': '你'}},
-        {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': '好'}},
-        {'type': 'content_block_start', 'content_block': {'type': 'tool_use', 'id': 't1', 'name': 'f'}},
-        {'type': 'content_block_delta', 'delta': {'type': 'input_json_delta', 'partial_json': '{"a":1}'}},
-        {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 5}},
+        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking'}},
+        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': '先想'}},
+        {'type': 'content_block_stop', 'index': 0},
+        {'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'text'}},
+        {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'text_delta', 'text': '你'}},
+        {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'text_delta', 'text': '好'}},
+        {'type': 'content_block_stop', 'index': 1},
+        {'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'tool_use', 'id': 't1', 'name': 'f', 'input': {}}},
+        {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'input_json_delta', 'partial_json': '{"a"'}},
+        {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'input_json_delta', 'partial_json': ':1}'}},
+        {'type': 'content_block_stop', 'index': 2},
+        {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': {'output_tokens': 5}},
     ]:
         protocols.parse_event(settings('anthropic'), event, reply)
-    print('anthropic parsed:', reply.text, reply.usage, reply.finish_reason, reply.tool_calls)
+    print('anthropic parsed:', reply.text, reply.reasoning, reply.usage, reply.finish_reason, reply.tool_calls)
     if reply.text != '你好':
         problems.append(f'anthropic text parse: {reply.text!r}')
+    if reply.reasoning != '先想':
+        problems.append(f'anthropic streamed thinking parse: {reply.reasoning!r}')
     if reply.usage.prompt_tokens != 11 or reply.usage.completion_tokens != 5 or reply.usage.cached_tokens != 7:
         problems.append(f'anthropic usage parse: {reply.usage}')
+    if not reply.tool_calls or reply.tool_calls[0].get('name') != 'f':
+        problems.append(f'anthropic streamed tool parse: {reply.tool_calls}')
+    elif reply.tool_calls[0].get('arguments') != '{"a":1}':
+        problems.append(f'anthropic streamed tool arguments not accumulated: {reply.tool_calls[0].get("arguments")!r}')
 
     # ---------- anthropic parsing (non-streamed document) ----------
     reply = Reply()
@@ -120,6 +170,8 @@ def main() -> None:
     }, reply)
     if reply.text != 'hi' or not reply.tool_calls or reply.tool_calls[0]['name'] != 'g':
         problems.append(f'anthropic non-stream parse: {reply.text!r} {reply.tool_calls}')
+    elif json.loads(reply.tool_calls[0].get('arguments') or 'null') != {'a': 1}:
+        problems.append(f'anthropic non-stream tool input dropped: {reply.tool_calls[0].get("arguments")!r}')
     print('anthropic non-stream:', reply.text, reply.tool_calls, reply.finish_reason)
 
     # ---------- gemini parsing ----------
@@ -138,6 +190,14 @@ def main() -> None:
     if not blocked.error:
         problems.append('gemini blockReason must surface as an error')
     print('gemini blocked ->', blocked.error)
+
+    # A 200 whose JSON is Chat Completions shaped must not parse as silence: the
+    # Messages path answered in the wrong wire format and that is the finding.
+    wrong_shape = Reply()
+    protocols.parse_event(settings('anthropic'), {'choices': [{'message': {'content': 'hi'}}]}, wrong_shape)
+    if not wrong_shape.error:
+        problems.append('anthropic parser must flag a chat-shaped body on the Messages path')
+    print('anthropic chat-shaped body ->', wrong_shape.error)
 
     # ---------- responses parsing ----------
     reply = Reply()
