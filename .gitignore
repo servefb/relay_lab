@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+.selfcheck/
+.pytest-tmp/
+.pytest_cache/
+.ruff_cache/
+.idea/
+.e2e-data/
+.selfcheck_*.py
+web/node_modules/
+web/*.tsbuildinfo

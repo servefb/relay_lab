@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>中转站实验室 · Relay Lab</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 3v4m0 10v4M3 12h4m10 0h4M5.6 5.6l2.8 2.8m7.2 7.2 2.8 2.8m0-12.8-2.8 2.8m-7.2 7.2-2.8 2.8" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><circle cx="12" cy="12" r="2.4" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+      </span>
+      <div><strong>Relay Lab</strong><small>CONSOLE</small></div>
+    </div>
+
+    <nav id="nav">
+      <button type="button" data-view="overview" aria-current="page">
+        <svg viewBox="0 0 24 24" width="15" height="15"><rect x="4" y="4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/><rect x="13" y="4" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/><rect x="4" y="13" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/><rect x="13" y="13" width="7" height="7" rx="1.6" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+        概览
+      </button>
+      <button type="button" data-view="speed">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 20a8 8 0 1 0-8-8" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="m12 12 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        速度测试
+      </button>
+      <button type="button" data-view="parallel">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M5 19V9m7 10V5m7 14v-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        并行测试
+      </button>
+      <button type="button" data-view="new">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M8 5.5v13l10-6.5-10-6.5Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+        容量探测
+      </button>
+      <button type="button" data-view="quality">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        模型质量
+      </button>
+      <button type="button" data-view="schedules">
+        <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M12 8v4.5l3 1.8" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+        定时任务
+      </button>
+      <button type="button" data-view="history">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+        实验记录
+      </button>
+      <button type="button" data-view="method">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3.8 5 6.6v5.1c0 4.2 2.9 7.3 7 8.5 4.1-1.2 7-4.3 7-8.5V6.6L12 3.8Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+        测试口径
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <div class="chip">
+        <span class="avatar">RL</span>
+        <span class="chip-text"><strong>本机模式</strong><small>127.0.0.1 only</small></span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">概览</h1>
+      <div class="topbar-actions">
+        <button id="refresh" class="ghost" type="button">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v4h-4" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
+          刷新
+        </button>
+        <button id="demo" class="solid" type="button">先跑一次本地演示</button>
+      </div>
+    </header>
+
+    <div id="alert" class="alert" role="alert" hidden><span id="alert-text"></span><button type="button" id="alert-close">关闭</button></div>
+    <div id="notice" class="notice" hidden><span id="notice-text"></span></div>
+
+    <!-- ============ 概览 ============ -->
+    <section class="view" data-view-panel="overview">
+      <p class="view-sub" id="overview-sub">尚未开始 · 结果由真实请求产生</p>
+
+      <div class="wide-cards">
+        <article class="card wide">
+          <header><span>当前合格 RPM</span><b id="wide-rpm">0</b></header>
+          <div class="spark" id="spark-rpm"></div>
+        </article>
+        <article class="card wide">
+          <header><span>当前合格输出 TPM</span><b id="wide-tpm">0</b></header>
+          <div class="spark" id="spark-tpm"></div>
+        </article>
+      </div>
+
+      <div class="stat-cards">
+        <article><b id="k-requests">0</b><span>请求数</span><em id="k-requests-sub">未开始</em></article>
+        <article><b id="k-success">—</b><span>成功率</span><em id="k-success-sub">最近一档</em></article>
+        <article><b id="k-tokens">—</b><span>输出 TOKEN</span><em>对应档位均值</em></article>
+        <article><b id="k-ttft">—</b><span>TTFT P99</span><em>最近一档</em></article>
+      </div>
+
+      <div id="findings" class="findings"></div>
+
+      <section class="card table-card">
+        <header class="card-head">
+          <div>
+            <h2>最近档位</h2>
+            <p id="run-message">连接模型后，选择目标并开始测试</p>
+          </div>
+          <div class="card-head-actions">
+            <button id="export" type="button" disabled>导出报告</button>
+            <button id="goto-new" type="button" class="link">容量探测 →</button>
+          </div>
+        </header>
+        <div class="track"><span id="bar"></span></div>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>档位 / 轮次</th><th>目标负载</th><th>成功 RPM</th><th>输出 TPM</th><th>成功率</th><th>TTFT P99</th><th>判定</th></tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============ 速度测试 ============ -->
+    <section class="view" data-view-panel="speed" hidden>
+      <p class="view-sub">固定请求数、固定并发，只测单请求延迟与出词速度，不做压力搜索。</p>
+      <div class="new-grid">
+        <form class="card form-card" id="speed-form">
+          <div class="section-title"><span>01</span><h2>连接你的模型</h2></div>
+          <div data-connection="speed"></div>
+
+          <div class="section-title"><span>02</span><h2>测多少</h2></div>
+          <div class="two">
+            <label>请求数
+              <input type="number" id="speed-requests" min="1" max="500" value="20" />
+            </label>
+            <label>并发
+              <input type="number" id="speed-parallel" min="1" max="8" value="1" />
+            </label>
+          </div>
+          <div class="two">
+            <label>输出上限（tokens）
+              <input type="number" id="speed-tokens" min="8" max="4096" value="256" />
+            </label>
+            <label>单请求超时（秒）
+              <input type="number" id="speed-timeout" min="2" max="300" value="60" />
+            </label>
+          </div>
+          <label class="consent"><input id="speed-consent" type="checkbox" /><span>我有权限测试此接口，知晓会产生请求费用。</span></label>
+          <button class="primary" type="submit" id="speed-start" disabled>开始测速</button>
+          <button class="danger" type="button" id="speed-stop" hidden>停止</button>
+        </form>
+
+        <aside class="side-stack">
+          <section class="card">
+            <h2 class="mini-title">最近一次测速</h2>
+            <div class="stat-cards compact" id="speed-stats">
+              <article><b id="speed-ttft50">—</b><span>TTFT P50</span><em>首字延迟</em></article>
+              <article><b id="speed-ttft99">—</b><span>TTFT P99</span><em>长尾</em></article>
+              <article><b id="speed-latency">—</b><span>平均延迟</span><em>整段耗时</em></article>
+              <article><b id="speed-tps">—</b><span>输出速度</span><em>tok/s</em></article>
+            </div>
+            <p class="hint" id="speed-note">还没有测速记录。</p>
+          </section>
+          <section class="card">
+            <h2 class="mini-title">说明</h2>
+            <ul class="warnings">
+              <li>并发保持 1 时，测的是单路体验；并发大于 1 时，分位数会互相干扰。</li>
+              <li>输出上限限制生成长度，实际 token 由模型决定。</li>
+              <li>样本量等于请求数，P99 在 20 个样本下约等于最大值。</li>
+            </ul>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 并行测试 ============ -->
+    <section class="view" data-view-panel="parallel" hidden>
+      <p class="view-sub">按你给的并发档位逐档压测，看吞吐随并发怎么变化。</p>
+      <div class="new-grid">
+        <form class="card form-card" id="parallel-form">
+          <div class="section-title"><span>01</span><h2>连接你的模型</h2></div>
+          <div data-connection="parallel"></div>
+
+          <div class="section-title"><span>02</span><h2>压哪些并发</h2></div>
+          <label>并发档位（逗号分隔，最多 8 个）
+            <input type="text" id="parallel-levels" value="1, 2, 4, 8" placeholder="例如 1, 2, 4, 8" />
+          </label>
+          <div class="two">
+            <label>每档秒数
+              <input type="number" id="parallel-seconds" min="5" max="300" value="15" />
+            </label>
+            <label>输出上限（tokens）
+              <input type="number" id="parallel-tokens" min="8" max="4096" value="256" />
+            </label>
+          </div>
+          <label class="consent"><input id="parallel-consent" type="checkbox" /><span>我有权限测试此接口，知晓会产生请求费用。</span></label>
+          <button class="primary" type="submit" id="parallel-start" disabled>开始并行测试</button>
+          <button class="danger" type="button" id="parallel-stop" hidden>停止</button>
+        </form>
+
+        <aside class="side-stack">
+          <section class="card">
+            <h2 class="mini-title">最近一次并行测试</h2>
+            <div class="spark" id="parallel-spark"></div>
+            <p class="hint" id="parallel-note">还没有记录。</p>
+          </section>
+          <section class="card">
+            <h2 class="mini-title">说明</h2>
+            <ul class="warnings">
+              <li>每档发满设定秒数，请求数按并发自动估算。</li>
+              <li>吞吐下降不等于站点上限，也可能命中客户端或网络瓶颈。</li>
+              <li>本页不做达标判定，只给事实数字。</li>
+            </ul>
+          </section>
+        </aside>
+
+        <section class="card table-card wide-table">
+          <header class="card-head"><div><h2>逐档结果</h2><p id="parallel-message">—</p></div>
+            <div class="card-head-actions"><button id="parallel-export" type="button" disabled>导出报告</button></div>
+          </header>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>并发</th><th>请求 / 成功</th><th>成功 RPM</th><th>输出 TPM</th><th>TTFT P50</th><th>TTFT P99</th><th>平均延迟</th></tr></thead>
+              <tbody id="parallel-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============ 容量探测（原有） ============ -->
+    <section class="view" data-view-panel="new" hidden>
+      <p class="view-sub">倍增加压，找到当前条件下的合格吞吐；严格 SLA 下会给下界而不是绝对极限。</p>
+      <div class="new-grid">
+        <form id="form" class="card form-card">
+          <div class="section-title"><span>01</span><h2>连接你的模型</h2></div>
+          <div data-connection="capacity"></div>
+
+          <div class="section-title"><span>02</span><h2>想测什么？</h2></div>
+          <div class="goals" role="group" aria-label="测试目标">
+            <button type="button" data-goal="both" aria-pressed="true">两项都测</button>
+            <button type="button" data-goal="rpm" aria-pressed="false">最大 RPM</button>
+            <button type="button" data-goal="tpm" aria-pressed="false">输出 TPM</button>
+          </div>
+          <div class="presets">
+            <button type="button" data-preset="quick" aria-pressed="true"><strong>快速探索</strong><small>每档 10 秒 · 先了解大概</small></button>
+            <button type="button" data-preset="steady" aria-pressed="false"><strong>稳定复核</strong><small>每档 60 秒 × 3 次 · 消耗更多</small></button>
+          </div>
+          <div class="safety">最多 <b id="budget">240</b> 个请求 · 并发不超过 <b id="parallel">8</b> · 总时长上限 <b id="wall">10</b> 分钟</div>
+
+          <details class="advanced">
+            <summary>高级参数 <span>通常不用改</span></summary>
+            <div class="grid" id="advanced"></div>
+            <p class="hint">Token 预留是估算保护，不是严格费用上限；输出长度以真实返回为准。</p>
+          </details>
+
+          <label class="consent"><input id="consent" type="checkbox" /><span>我有权限测试此接口，已确认上述负载和预算，并知晓可能产生费用。</span></label>
+          <button id="start" class="primary" type="submit" disabled>开始探测</button>
+          <button id="stop" class="danger" type="button" hidden>立即停止当前实验</button>
+        </form>
+
+        <aside class="side-stack">
+          <section class="card">
+            <h2 class="mini-title">实验会怎么跑</h2>
+            <ol class="flow">
+              <li><b>倍增</b>从起始压力翻倍，直到某档不达标或到上限。</li>
+              <li><b>向下折半</b>首档就不达标时，减半找一个达标的下界。</li>
+              <li><b>二分复测</b>在达标与不达标之间收窄，给出边界区间。</li>
+            </ol>
+            <p class="hint">每档都有独立的请求、Token 与时长上限，超出即停止。</p>
+          </section>
+          <section class="card">
+            <h2 class="mini-title">当前预算</h2>
+            <dl class="kv">
+              <div><dt>请求上限</dt><dd id="side-budget">240</dd></div>
+              <div><dt>估算 Token</dt><dd id="side-token">1,000,000</dd></div>
+              <div><dt>总时长</dt><dd id="side-wall">10 分钟</dd></div>
+              <div><dt>每档</dt><dd id="side-stage">10 秒 × 1 次</dd></div>
+            </dl>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 模型质量 ============ -->
+    <section class="view" data-view-panel="quality" hidden>
+      <p class="view-sub">20 道内置固定题，规则判分：这是冒烟质量检查，不是基准测试。</p>
+      <div class="new-grid">
+        <form class="card form-card" id="quality-form">
+          <div class="section-title"><span>01</span><h2>连接你的模型</h2></div>
+          <div data-connection="quality"></div>
+
+          <div class="section-title"><span>02</span><h2>抽查哪些能力</h2></div>
+          <div class="chips" id="quality-categories"></div>
+          <div class="two">
+            <label>每类题数
+              <input type="number" id="quality-per" min="1" max="20" value="4" />
+            </label>
+            <label>并发
+              <input type="number" id="quality-parallel" min="1" max="8" value="1" />
+            </label>
+          </div>
+          <label class="consent"><input id="quality-consent" type="checkbox" /><span>我有权限测试此接口，知晓会产生请求费用。</span></label>
+          <button class="primary" type="submit" id="quality-start" disabled>开始质量抽查</button>
+          <button class="danger" type="button" id="quality-stop" hidden>停止</button>
+        </form>
+
+        <aside class="side-stack">
+          <section class="card">
+            <h2 class="mini-title">最近一次抽查</h2>
+            <div class="score" id="quality-score">—</div>
+            <div id="quality-categories-result" class="bars"></div>
+            <p class="hint" id="quality-note">还没有记录。</p>
+          </section>
+          <section class="card">
+            <h2 class="mini-title">说明</h2>
+            <ul class="warnings">
+              <li>判分只提取关键结果，允许解释性文字。</li>
+              <li>代码题只检查结构，不执行、不评价风格。</li>
+              <li>题量小，单题失败不必惊慌，看分类分布更有意义。</li>
+            </ul>
+          </section>
+        </aside>
+
+        <section class="card table-card wide-table">
+          <header class="card-head"><div><h2>逐题结果</h2><p id="quality-message">—</p></div>
+            <div class="card-head-actions"><button id="quality-export" type="button" disabled>导出报告</button></div>
+          </header>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>#</th><th>分类</th><th>题目</th><th>期望</th><th>回答</th><th>耗时</th><th>判定</th></tr></thead>
+              <tbody id="quality-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============ 定时任务 ============ -->
+    <section class="view" data-view-panel="schedules" hidden>
+      <p class="view-sub">按间隔重复执行。密钥只留在内存，服务重启后需要重新输入。</p>
+      <div class="new-grid">
+        <form class="card form-card" id="schedule-form">
+          <div class="section-title"><span>01</span><h2>新建定时任务</h2></div>
+          <div class="two">
+            <label>名称
+              <input type="text" id="schedule-label" maxlength="80" placeholder="例如：每小时测速" />
+            </label>
+            <label>间隔（分钟）
+              <input type="number" id="schedule-interval" min="5" max="1440" value="60" />
+            </label>
+          </div>
+          <label>任务类型
+            <select id="schedule-kind">
+              <option value="speed">速度测试</option>
+              <option value="parallel">并行测试</option>
+              <option value="capacity">容量探测</option>
+            </select>
+          </label>
+          <div data-connection="schedule"></div>
+          <div class="two" id="schedule-extras">
+            <label data-extra="speed">请求数
+              <input type="number" id="schedule-speed-requests" min="1" max="500" value="20" />
+            </label>
+            <label data-extra="parallel" hidden>并发档位
+              <input type="text" id="schedule-parallel-levels" value="1, 4" />
+            </label>
+            <label data-extra="capacity" hidden>起始 RPM
+              <input type="number" id="schedule-start-rpm" min="1" max="6000" value="30" />
+            </label>
+          </div>
+          <p class="hint">容量探测使用快速探索预设；并行测试每档 15 秒。</p>
+          <label class="consent"><input id="schedule-consent" type="checkbox" /><span>我确认这些请求会真实发出，并知晓长期运行的费用。</span></label>
+          <button class="primary" type="submit" id="schedule-create" disabled>创建定时任务</button>
+        </form>
+
+        <aside class="side-stack">
+          <section class="card">
+            <h2 class="mini-title">任务列表</h2>
+            <div id="schedule-list" class="schedule-list"></div>
+          </section>
+          <section class="card">
+            <h2 class="mini-title">说明</h2>
+            <ul class="warnings">
+              <li>调度器每 20 秒检查一次，误差在 20 秒内。</li>
+              <li>同时只允许一个实验运行；撞车时该次记为“被占用”，下个周期重试。</li>
+              <li>密钥不落盘；重启后任务保留，但需要重新输入密钥才能继续。</li>
+            </ul>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 实验记录 ============ -->
+    <section class="view" data-view-panel="history" hidden>
+      <p class="view-sub">勾选两份记录可在下方并排对照；配置指纹不同只可参考，不能直接比高低。</p>
+      <div class="history-grid">
+        <section class="card">
+          <div class="card-head"><h2>实验记录</h2><span class="count" id="count">0</span></div>
+          <div id="history" class="history-list"></div>
+        </section>
+        <section id="compare" class="card" hidden></section>
+      </div>
+    </section>
+
+    <!-- ============ 测试口径 ============ -->
+    <section class="view" data-view-panel="method" hidden>
+      <p class="view-sub">这些是结果的适用边界，读数前请先看一遍。</p>
+      <section class="card">
+        <h2 class="mini-title">本次实验的限制</h2>
+        <ul id="warnings" class="warnings"></ul>
+        <p id="fingerprint" class="fingerprint"></p>
+      </section>
+      <section class="card">
+        <h2 class="mini-title">实现边界</h2>
+        <ul class="warnings">
+          <li>调度、HTTP、SSE、Token 与延迟统计使用 EvalScope 的压测引擎；搜索策略、预算、判定、质量题集与页面是 relay_lab 自有实现。</li>
+          <li>速度/并行/质量三类走同一套引擎或自写客户端，但都不做容量推断。</li>
+          <li>质量题集为 20 道固定题，规则判分，不能替代 MMLU 一类基准。</li>
+          <li>缺少延迟或 Token 指标时判为“未判定”，不会推成达标。</li>
+          <li>默认只监听本机，没有账户体系；不要部署到公网。</li>
+        </ul>
+      </section>
+    </section>
+
+    <footer class="foot">relay_lab · 自有控制器 + EvalScope 压测引擎 · 真实观测，保留不确定性</footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
